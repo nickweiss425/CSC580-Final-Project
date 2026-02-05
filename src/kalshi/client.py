@@ -35,22 +35,18 @@ def fetch_markets(
     resp.raise_for_status()
     return resp.json()
 
-
 def normalize_markets(raw_markets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Convert a list of raw market dicts (already filtered) into UI-friendly dicts.
-    """
     normalized = []
     for m in raw_markets:
         normalized.append({
             "id": m.get("ticker"),
-            "title": m.get("_short_title", m.get("title", "")),
-            # optional extras for badges
-            "volume_24h": m.get("volume_24h", 0),
-            "liquidity": m.get("liquidity", 0),
-            "status": m.get("status", ""),
+            "title": m.get("title", ""),
+            "list_title": build_list_title(m),
         })
     return normalized
+
+
+
 
 def search_markets_all(
     query: str,
@@ -101,3 +97,96 @@ def search_markets_all(
     return results
 
     
+def search_markets_progressive(
+    query: str,
+    mve_filter: str = "exclude",
+    page_limit: int = 200,
+    initial_pages: int = 5,
+    max_pages: int = 100,
+    target_results: int = 100,
+    status: str = "open",
+) -> list[dict]:
+
+    q = query.strip().lower()
+    if not q:
+        return []
+    
+    results = []
+    cursor = None
+    pages_checked = 0
+
+    # phase 1: scan first few pages
+    while pages_checked < initial_pages:
+        raw = fetch_markets(limit=page_limit, cursor=cursor,
+                             status=status, mve_filter=mve_filter)
+        markets = raw.get("markets", [])
+        for m in markets:
+            if q in (m.get("title","").lower() + m.get("ticker","").lower()):
+                results.append(m)
+                if len(results) >= target_results:
+                    return results
+        cursor = raw.get("cursor") or raw.get("next_cursor")
+        pages_checked += 1
+        if not cursor:
+            return results
+
+    # phase 2: continue if needed
+    while pages_checked < max_pages and len(results) < target_results:
+        raw = fetch_markets(limit=page_limit, cursor=cursor,
+                             status=status, mve_filter=mve_filter)
+        markets = raw.get("markets", [])
+        for m in markets:
+            if q in (m.get("title","").lower() + m.get("ticker","").lower()):
+                results.append(m)
+                if len(results) >= target_results:
+                    return results
+        cursor = raw.get("cursor") or raw.get("next_cursor")
+        pages_checked += 1
+        if not cursor:
+            break
+
+    return results
+
+
+
+def fetch_market_by_ticker(
+    ticker: str,
+    timeout_s: int = 10,
+) -> Dict[str, Any]:
+    """
+    Fetch a single market by its ticker.
+    Returns raw JSON (dict). The market dict is usually in response["market"].
+    """
+    t = (ticker or "").strip()
+    if not t:
+        raise ValueError("ticker is empty")
+
+    url = f"{BASE_URL}/markets/{t}"
+    resp = requests.get(url, timeout=timeout_s)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def build_list_title(m: dict) -> str:
+    base = (m.get("title") or "").strip()
+
+    strike = m.get("floor_strike")
+    strike_type = m.get("strike_type")
+
+    # Numeric thresholds
+    if strike is not None and strike_type in {"greater", "less", "greater_equal", "less_equal"}:
+        sym = {
+            "greater": ">",
+            "less": "<",
+            "greater_equal": "≥",
+            "less_equal": "≤",
+        }[strike_type]
+        return f"{base} — {sym} {strike}"
+
+    # If YES label clarifies the market, append it
+    yes_label = (m.get("yes_sub_title") or "").strip()
+    if yes_label:
+        return f"{base}    {yes_label}"
+
+    return base
+

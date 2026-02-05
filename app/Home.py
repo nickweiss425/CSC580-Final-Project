@@ -7,8 +7,12 @@ sys.path.append(str(ROOT_DIR))
 
 
 import streamlit as st
-from src.kalshi.client import fetch_markets, normalize_markets, search_markets_all
-
+from src.kalshi.client import (
+    fetch_markets,
+    normalize_markets,
+    search_markets_progressive,
+    fetch_market_by_ticker,   
+)
 
 
 # ----------------------------
@@ -77,6 +81,21 @@ def render_market_browser() -> None:
     # setup header
     st.subheader("Market Browser")
 
+    # direct load by ticker
+    ticker = st.text_input("Load by ticker", placeholder="e.g. KXNCAAMBTOTAL-26FEB04PEPPSEA-151")
+    load_clicked = st.button("Load ticker", use_container_width=True)
+
+    if load_clicked:
+        try:
+            raw = fetch_market_by_ticker(ticker)
+            if "market" in raw:
+                market = raw["market"]
+            else:
+                market = raw  
+            set_market_results(normalize_markets([market]))
+        except Exception as e:
+            st.error(f"Could not load ticker: {e}")
+
     # search input for market names
     query = st.text_input("Search markets", placeholder="Type keywords…")
     col_a, col_b = st.columns([1, 1])
@@ -92,11 +111,11 @@ def render_market_browser() -> None:
         markets = get_markets_cached(limit=200)
         set_market_results(markets)
 
-    # SEARCH BEHAVIOR --> CHANGE THIS AFTER KALSHI CONNECTION
+    # search behavior
     if search_clicked:
-        search_results = search_markets_all(query, mve_filter="exclude")
+        search_results = search_markets_progressive(query,  mve_filter="exclude")
         search_results_norm = normalize_markets(search_results)
-        st.session_state.market_results = search_results_norm 
+        set_market_results(search_results_norm)
 
     # get results from state
     results = st.session_state.market_results
@@ -126,9 +145,9 @@ def render_market_browser() -> None:
         title = mid
         for m in results:
             if m["id"] == mid:
-                title = m["title"]
+                list_title = m["list_title"]
                 break
-        return f"{title}  -  {mid}"
+        return f"{list_title}"
 
     default_index = options.index(st.session_state.selected_market_id)
 
