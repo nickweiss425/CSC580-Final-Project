@@ -53,7 +53,7 @@ def search_markets_all(
     mve_filter: str = "exclude",
     page_limit: int = 200,
     max_pages: int = 200,
-    max_results: int = 500,
+    max_results: int = 100,
     status: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     
@@ -181,9 +181,9 @@ def build_list_title(m: dict) -> str:
             "greater_equal": "≥",
             "less_equal": "≤",
         }[strike_type]
-        return f"{base} — {sym} {strike}"
+        return f"{base} {sym} {strike}"
 
-    # If YES label clarifies the market, append it
+    # if YES label clarifies the market, append it
     yes_label = (m.get("yes_sub_title") or "").strip()
     if yes_label:
         return f"{base}    {yes_label}"

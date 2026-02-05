@@ -28,7 +28,7 @@ def init_state() -> None:
     if "selected_market_id" not in st.session_state:
         st.session_state.selected_market_id = None
 
-    # market_results: list currently shown in the left panel (after search
+    # market_results: list currently shown in the left panel (after search)
     if "market_results" not in st.session_state:
         st.session_state.market_results = get_markets_cached(limit=200)    
 
@@ -113,7 +113,7 @@ def render_market_browser() -> None:
 
     # search behavior
     if search_clicked:
-        search_results = search_markets_progressive(query,  mve_filter="exclude")
+        search_results = search_markets_progressive(query,  mve_filter="exclude", target_results=20)
         search_results_norm = normalize_markets(search_results)
         set_market_results(search_results_norm)
 
