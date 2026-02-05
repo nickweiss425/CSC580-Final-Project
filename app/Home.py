@@ -212,10 +212,8 @@ def render_market_details(selected_market: dict) -> None:
     # --- Prices (lightweight orderbook snapshot) ---
     st.markdown("#### Current Prices")
     c1, c2 = st.columns(2)
-    c1.metric("YES Bid", selected_market.get("yes_bid_dollars", "—"))
-    c1.metric("YES Ask", selected_market.get("yes_ask_dollars", "—"))
-    c2.metric("NO Bid", selected_market.get("no_bid_dollars", "—"))
-    c2.metric("NO Ask", selected_market.get("no_ask_dollars", "—"))
+    c1.metric("Cost to buy YES", selected_market.get("yes_ask_dollars", "—"))
+    c2.metric("Cost to buy NO", selected_market.get("no_ask_dollars", "—"))
 
 
 
