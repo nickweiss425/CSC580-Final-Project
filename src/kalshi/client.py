@@ -38,11 +38,9 @@ def fetch_markets(
 def normalize_markets(raw_markets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     normalized = []
     for m in raw_markets:
-        normalized.append({
-            "id": m.get("ticker"),
-            "title": m.get("title", ""),
-            "list_title": build_list_title(m),
-        })
+        m_copy = dict(m)             
+        m_copy["list_title"] = build_list_title(m_copy)
+        normalized.append(m_copy)
     return normalized
 
 

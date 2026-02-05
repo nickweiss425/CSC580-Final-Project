@@ -130,7 +130,7 @@ def render_market_browser() -> None:
     # these are the options shown in the search results
     options = []
     for m in results:
-        options.append(m["id"])
+        options.append(m["ticker"])
 
     # ensure selection is valid
     current_selection = st.session_state.selected_market_id
@@ -144,7 +144,7 @@ def render_market_browser() -> None:
         # find title for this market id (fallback to id)
         title = mid
         for m in results:
-            if m["id"] == mid:
+            if m["ticker"] == mid:
                 list_title = m["list_title"]
                 break
         return f"{list_title}"
@@ -166,40 +166,59 @@ def render_market_browser() -> None:
 # UI: Right panel
 # ----------------------------
 def get_selected_market() -> dict | None:
-    selected_id = st.session_state.selected_market_id
+    selected_id = st.session_state.get("selected_market_id")
     if not selected_id:
         return None
-    return next((m for m in MOCK_MARKETS if m["id"] == selected_id), None)
+
+    results = st.session_state.get("market_results", [])
+    return next((m for m in results if m.get("ticker") == selected_id), None)
+
 
 
 def render_market_details(selected_market: dict) -> None:
     st.subheader("Market Details")
 
-    st.markdown(f"**Market ID:** `{selected_market['id']}`")
-    st.markdown(f"**Title:** {selected_market['title']}")
+    # --- Header ---
+    st.markdown(f"**Market ID:** `{selected_market.get('ticker')}`")
+    st.markdown(f"**Title:** {selected_market.get('title')}")
+    st.caption(selected_market.get("list_title", ""))
 
-    # Placeholder for Kalshi-driven details
-    st.markdown("#### Details (placeholder)")
-    st.write(
-        {
-            "status": "active",
-            "close_time": "TBD",
-            "settlement_rule": "TBD from Kalshi market description/rules",
-            "implied_probability": "TBD from Kalshi price/orderbook",
-        }
-    )
+    st.divider()
 
-    st.markdown("#### Order Book (placeholder)")
-    st.write(
-        {
-            "yes_bids_top": [(61, 120), (60, 200)],
-            "no_bids_top": [(41, 80), (40, 110)],
-            "last_updated": "TBD",
-        }
-    )
+    # --- Core details ---
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Status", selected_market.get("status", "—"))
+    c2.metric("Close Time", selected_market.get("close_time", "—"))
+    c3.metric("Liquidity", f"${selected_market.get('liquidity_dollars', '—')}")
+
+    # --- Resolution rules ---
+    rules = selected_market.get("rules_primary")
+    if rules:
+        st.markdown("#### Resolution Rules")
+        st.write(rules)
+
+    # --- YES / NO semantics ---
+    yes_label = selected_market.get("yes_sub_title")
+    no_label = selected_market.get("no_sub_title")
+
+    if yes_label or no_label:
+        st.markdown("#### Contract Semantics")
+        if yes_label:
+            st.markdown(f"**YES resolves if:** {yes_label}")
+        if no_label:
+            st.markdown(f"**NO resolves if:** {no_label}")
+
+    # --- Prices (lightweight orderbook snapshot) ---
+    st.markdown("#### Current Prices")
+    c1, c2 = st.columns(2)
+    c1.metric("YES Bid", selected_market.get("yes_bid_dollars", "—"))
+    c1.metric("YES Ask", selected_market.get("yes_ask_dollars", "—"))
+    c2.metric("NO Bid", selected_market.get("no_bid_dollars", "—"))
+    c2.metric("NO Ask", selected_market.get("no_ask_dollars", "—"))
 
 
-def generate_stub_recommendation() -> dict:
+
+def generate_recommendation() -> dict:
     # Placeholder until the agent system is wired
     return {
         "action": "DON'T_BUY",
@@ -220,7 +239,7 @@ def render_recommendation_panel() -> None:
     get_rec = st.button("Get recommendation", type="primary")
 
     if get_rec:
-        st.session_state.recommendation = generate_stub_recommendation()
+        st.session_state.recommendation = generate_recommendation()
 
     rec = st.session_state.recommendation
     if rec is None:
@@ -268,8 +287,8 @@ def main() -> None:
     left, right = st.columns([1.1, 1.9], gap="large")
     with left:
         render_market_browser()
-    # with right:
-    #     render_right_panel()
+    with right:
+        render_right_panel()
 
 
 if __name__ == "__main__":
