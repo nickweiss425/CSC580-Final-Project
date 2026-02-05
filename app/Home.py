@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 
-# Add project root to Python path
+# add project root to Python path
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT_DIR))
 
@@ -85,6 +85,7 @@ def render_market_browser() -> None:
     ticker = st.text_input("Load by ticker", placeholder="e.g. KXNCAAMBTOTAL-26FEB04PEPPSEA-151")
     load_clicked = st.button("Load ticker", use_container_width=True)
 
+    # option to fetch market by ticker id
     if load_clicked:
         try:
             raw = fetch_market_by_ticker(ticker)
@@ -198,15 +199,15 @@ def render_market_details(selected_market: dict) -> None:
         st.write(rules)
 
     # --- YES / NO semantics ---
-    yes_label = selected_market.get("yes_sub_title")
-    no_label = selected_market.get("no_sub_title")
+    # yes_label = selected_market.get("yes_sub_title")
+    # no_label = selected_market.get("no_sub_title")
 
-    if yes_label or no_label:
-        st.markdown("#### Contract Semantics")
-        if yes_label:
-            st.markdown(f"**YES resolves if:** {yes_label}")
-        if no_label:
-            st.markdown(f"**NO resolves if:** {no_label}")
+    # if yes_label or no_label:
+    #     st.markdown("#### Contract Semantics")
+    #     if yes_label:
+    #         st.markdown(f"**YES resolves if:** {yes_label}")
+    #     if no_label:
+    #         st.markdown(f"**NO resolves if:** {no_label}")
 
     # --- Prices (lightweight orderbook snapshot) ---
     st.markdown("#### Current Prices")
@@ -219,7 +220,7 @@ def render_market_details(selected_market: dict) -> None:
 
 
 def generate_recommendation() -> dict:
-    # Placeholder until the agent system is wired
+    # placeholder until the agent system is wired
     return {
         "action": "DON'T_BUY",
         "direction": "YES",
