@@ -217,21 +217,16 @@ def render_market_details(selected_market: dict) -> None:
 
 def generate_recommendation() -> dict:
     """
-    Generate a recommendation for the currently selected market
+    Run the end-to-end recommendation pipeline for the selected market.
 
-    The function builds a standardized MarketContext, runs one or more
-    specialized agents, and aggregates their outputs into a final
-    recommendation.
-
-    Returns:
-        dict containing:
-            - action (str)
-            - direction (str | None)
-            - confidence (float)
-            - explanation (str)
-            - agents (list of agent outputs for transparency)
+    Steps:
+      1) Build MarketContext (ctx)
+      2) Run RulesAgent (semantic clarity + possible veto)
+      3) Enrich ctx with semantics (ctx_enriched)
+      4) Run RiskAgent (deterministic execution-risk veto)
+      5) Run other specialized directional agents (Pricing/Trend/Evidence)
+      6) Aggregate all agent outputs into a final recommendation
     """
-
     selected_market = get_selected_market()
     if not selected_market:
         return {
@@ -242,39 +237,58 @@ def generate_recommendation() -> dict:
             "agents": [],
         }
 
-    # get nice dictionary with marker information
+    # build standardized context
     ctx = build_market_context(selected_market)
 
-    # ------ RULES AGENT (SEMANTICS / CLARITY) -------
+    agent_outputs = []
+
+    # RulesAgent (LLM): semantics + clarity gate
     rules_out = run_rules_agent_sync(ctx)
+    agent_outputs.append(rules_out)
 
-    # modify context with semantics for any downstream semantic agents
-    rules_signals = rules_out.get("signals", {}) or {}
-
+    # enrich context for downstream semantic agents
+    rules_sig = rules_out.get("signals", {}) or {}
     ctx_enriched = dict(ctx)
     ctx_enriched["semantics"] = {
-        "yes_means": rules_signals.get("yes_means", ""),
-        "no_means": rules_signals.get("no_means", ""),
+        "yes_means": rules_sig.get("yes_means", ""),
+        "no_means": rules_sig.get("no_means", ""),
         "clarity_score": float(rules_out.get("score", 0.0) or 0.0),
-        "ambiguity_flags": rules_signals.get("ambiguity_flags", []) or [],
-        "notes": rules_signals.get("notes", ""),
+        "ambiguity_flags": rules_sig.get("ambiguity_flags", []) or [],
+        "notes": rules_sig.get("notes", ""),
     }
 
-    # ------ RISK AGENT (DETERMINISTIC, NOT LLM) -------
+    # RiskAgent (deterministic)
     risk_out = run_risk_agent(ctx)
+    agent_outputs.append(risk_out)
 
+    # Specialized agents (ADD NEW AGENTS HERE!!!!)
+    # Example:
+    # pricing_out = run_pricing_agent_sync(ctx_enriched)
+    # agent_outputs.append(pricing_out)
 
-
-    # If either gatekeeper vetoes, stop early
-    veto_agents = [a for a in [rules_out, risk_out] if a.get("action") == "NO_TRADE"]
-    if veto_agents:
+    # simple aggregation logic
+    vetoes = [o for o in agent_outputs if o.get("action") == "NO_TRADE"]
+    if vetoes:
+        confidence = min(float(o.get("score", 0.0) or 0.0) for o in vetoes)
+        explanation = " | ".join(o.get("reason", "") for o in vetoes if o.get("reason"))
         return {
             "action": "NO_TRADE",
             "direction": None,
-            "confidence": min(float(a.get("score", 0.0) or 0.0) for a in veto_agents),
-            "explanation": " | ".join(a.get("reason", "") for a in veto_agents),
-            "agents": [rules_out, risk_out],
+            "confidence": confidence,
+            "explanation": explanation or "One or more agents vetoed this market.",
+            "agents": agent_outputs,
         }
+
+    # no directional agents yet. CHANGE THIS TO IMPLEMENT MORE COMPLEX AGGREAGTION LOGIC
+    # OR HAVE AN LLM AGENT AGGREGATE
+    return {
+        "action": "READY",  
+        "direction": None,
+        "confidence": min(float(o.get("score", 1.0) or 1.0) for o in agent_outputs),
+        "explanation": "Passed Rules + Risk checks. Add a directional agent next (Pricing/Trend/Evidence).",
+        "agents": agent_outputs,
+    }
+
 
 
 
