@@ -18,6 +18,7 @@ from src.kalshi.client import (
 from src.agents.market_context import build_market_context
 from src.agents.rules_agent import run_rules_agent_sync
 from src.agents.risk_agent import run_risk_agent
+from src.agents.pricing_baseline_agent import run_pricing_baseline_agent
 
 # ----------------------------
 # State helpers
@@ -224,8 +225,8 @@ def generate_recommendation() -> dict:
       2) Run RulesAgent (semantic clarity + possible veto)
       3) Enrich ctx with semantics (ctx_enriched)
       4) Run RiskAgent (deterministic execution-risk veto)
-      5) Run other specialized directional agents (Pricing/Trend/Evidence)
-      6) Aggregate all agent outputs into a final recommendation
+      5) Run directional agents (Pricing/Trend/Evidence)
+      6) Aggregate agent outputs into final recommendation
     """
     selected_market = get_selected_market()
     if not selected_market:
@@ -242,7 +243,9 @@ def generate_recommendation() -> dict:
 
     agent_outputs = []
 
+    # ----------------------------
     # RulesAgent (LLM): semantics + clarity gate
+    # ----------------------------
     rules_out = run_rules_agent_sync(ctx)
     agent_outputs.append(rules_out)
 
@@ -257,16 +260,28 @@ def generate_recommendation() -> dict:
         "notes": rules_sig.get("notes", ""),
     }
 
+    # ----------------------------
     # RiskAgent (deterministic)
+    # ----------------------------
     risk_out = run_risk_agent(ctx)
     agent_outputs.append(risk_out)
 
-    # Specialized agents (ADD NEW AGENTS HERE!!!!)
-    # Example:
-    # pricing_out = run_pricing_agent_sync(ctx_enriched)
-    # agent_outputs.append(pricing_out)
+    # ----------------------------
+    # Directional agents (ADD NEW AGENTS HERE!!!!)
+    # ----------------------------
+    pricing_out = run_pricing_baseline_agent(ctx)  # deterministic direction baseline
+    agent_outputs.append(pricing_out)
 
-    # simple aggregation logic
+    # Example future additions:
+    # trend_out = run_trend_agent(ctx)                 # uses candle history
+    # evidence_out = run_evidence_agent_sync(ctx_enriched)  # uses semantics + web
+    # agent_outputs.extend([trend_out, evidence_out])
+
+    # ----------------------------
+    # Aggregation
+    # ----------------------------
+
+    # any veto => NO_TRADE
     vetoes = [o for o in agent_outputs if o.get("action") == "NO_TRADE"]
     if vetoes:
         confidence = min(float(o.get("score", 0.0) or 0.0) for o in vetoes)
@@ -279,18 +294,41 @@ def generate_recommendation() -> dict:
             "agents": agent_outputs,
         }
 
-    # no directional agents yet. CHANGE THIS TO IMPLEMENT MORE COMPLEX AGGREAGTION LOGIC
-    # OR HAVE AN LLM AGENT AGGREGATE
+    # collect directional BUY votes (YES/NO)
+    buy_votes = [
+        o for o in agent_outputs
+        if o.get("action") == "BUY" and o.get("direction") in ("YES", "NO")
+    ]
+
+    # if no one voted to BUY, default to NO_TRADE (or READY)
+    if not buy_votes:
+        confidence = min(float(o.get("score", 1.0) or 1.0) for o in agent_outputs)
+        explanation = " | ".join(o.get("reason", "") for o in agent_outputs if o.get("reason"))
+        return {
+            "action": "NO_TRADE",
+            "direction": None,
+            "confidence": confidence,
+            "explanation": explanation or "No agent recommended a trade.",
+            "agents": agent_outputs,
+        }
+
+    # pick the strongest vote (highest score)
+    best_vote = max(buy_votes, key=lambda o: float(o.get("score", 0.0) or 0.0))
+    direction = best_vote["direction"]
+
+    # confidence: min of all agent scores, but treat None/missing as 1.0
+    confidence = min(float(o.get("score", 1.0) or 1.0) for o in agent_outputs)
+
+    # explanation: short combined reasons
+    explanation = " | ".join(o.get("reason", "") for o in agent_outputs if o.get("reason"))
+
     return {
-        "action": "READY",  
-        "direction": None,
-        "confidence": min(float(o.get("score", 1.0) or 1.0) for o in agent_outputs),
-        "explanation": "Passed Rules + Risk checks. Add a directional agent next (Pricing/Trend/Evidence).",
+        "action": "BUY",
+        "direction": direction,
+        "confidence": confidence,
+        "explanation": explanation or f"Direction chosen by {best_vote.get('agent','a directional agent')}.",
         "agents": agent_outputs,
     }
-
-
-
 
 
 
