@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+import json
 
 # add project root to Python path
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -14,6 +15,9 @@ from src.kalshi.client import (
     fetch_market_by_ticker,   
 )
 
+from src.agents.market_context import build_market_context
+from src.agents.rules_agent import run_rules_agent_sync
+from src.agents.risk_agent import run_risk_agent
 
 # ----------------------------
 # State helpers
@@ -70,8 +74,6 @@ def get_markets_cached(limit: int = 200):
 # ----------------------------
 
 
-
-
 def render_market_browser() -> None:
     """
         Render left part of the UI, which shows list of markets with search
@@ -88,11 +90,13 @@ def render_market_browser() -> None:
     # option to fetch market by ticker id
     if load_clicked:
         try:
+            # get the market info by ticker
             raw = fetch_market_by_ticker(ticker)
             if "market" in raw:
                 market = raw["market"]
             else:
                 market = raw  
+            # display the market of the ticker entered
             set_market_results(normalize_markets([market]))
         except Exception as e:
             st.error(f"Could not load ticker: {e}")
@@ -143,7 +147,6 @@ def render_market_browser() -> None:
 
     def fmt(mid: str) -> str:
         # find title for this market id (fallback to id)
-        title = mid
         for m in results:
             if m["ticker"] == mid:
                 list_title = m["list_title"]
@@ -179,6 +182,9 @@ def get_selected_market() -> dict | None:
 def render_market_details(selected_market: dict) -> None:
     st.subheader("Market Details")
 
+
+    # -----------------------------------
+
     # --- Header ---
     st.markdown(f"**Market ID:** `{selected_market.get('ticker')}`")
     st.markdown(f"**Title:** {selected_market.get('title')}")
@@ -198,16 +204,6 @@ def render_market_details(selected_market: dict) -> None:
         st.markdown("#### Resolution Rules")
         st.write(rules)
 
-    # --- YES / NO semantics ---
-    # yes_label = selected_market.get("yes_sub_title")
-    # no_label = selected_market.get("no_sub_title")
-
-    # if yes_label or no_label:
-    #     st.markdown("#### Contract Semantics")
-    #     if yes_label:
-    #         st.markdown(f"**YES resolves if:** {yes_label}")
-    #     if no_label:
-    #         st.markdown(f"**NO resolves if:** {no_label}")
 
     # --- Prices (lightweight orderbook snapshot) ---
     st.markdown("#### Current Prices")
@@ -217,18 +213,72 @@ def render_market_details(selected_market: dict) -> None:
 
 
 
+
+
 def generate_recommendation() -> dict:
-    # placeholder until the agent system is wired
-    return {
-        "action": "DON'T_BUY",
-        "direction": "YES",
-        "confidence": 0.55,
-        "explanation": "Stub output. Agents will be connected after Kalshi integration.",
-        "agents": [
-            {"agent": "Market Baseline", "output": "YES @ ~61%", "reason": "Derived from best YES bid."},
-            {"agent": "Momentum", "output": "NO (weak)", "reason": "Placeholder momentum signal."},
-        ],
+    """
+    Generate a recommendation for the currently selected market
+
+    The function builds a standardized MarketContext, runs one or more
+    specialized agents, and aggregates their outputs into a final
+    recommendation.
+
+    Returns:
+        dict containing:
+            - action (str)
+            - direction (str | None)
+            - confidence (float)
+            - explanation (str)
+            - agents (list of agent outputs for transparency)
+    """
+
+    selected_market = get_selected_market()
+    if not selected_market:
+        return {
+            "action": "NO_TRADE",
+            "direction": None,
+            "confidence": 0.0,
+            "explanation": "No market selected.",
+            "agents": [],
+        }
+
+    # get nice dictionary with marker information
+    ctx = build_market_context(selected_market)
+
+    # ------ RULES AGENT (SEMANTICS / CLARITY) -------
+    rules_out = run_rules_agent_sync(ctx)
+
+    # modify context with semantics for any downstream semantic agents
+    rules_signals = rules_out.get("signals", {}) or {}
+
+    ctx_enriched = dict(ctx)
+    ctx_enriched["semantics"] = {
+        "yes_means": rules_signals.get("yes_means", ""),
+        "no_means": rules_signals.get("no_means", ""),
+        "clarity_score": float(rules_out.get("score", 0.0) or 0.0),
+        "ambiguity_flags": rules_signals.get("ambiguity_flags", []) or [],
+        "notes": rules_signals.get("notes", ""),
     }
+
+    # ------ RISK AGENT (DETERMINISTIC, NOT LLM) -------
+    risk_out = run_risk_agent(ctx)
+
+
+
+    # If either gatekeeper vetoes, stop early
+    veto_agents = [a for a in [rules_out, risk_out] if a.get("action") == "NO_TRADE"]
+    if veto_agents:
+        return {
+            "action": "NO_TRADE",
+            "direction": None,
+            "confidence": min(float(a.get("score", 0.0) or 0.0) for a in veto_agents),
+            "explanation": " | ".join(a.get("reason", "") for a in veto_agents),
+            "agents": [rules_out, risk_out],
+        }
+
+
+
+
 
 
 def render_recommendation_panel() -> None:
@@ -245,17 +295,20 @@ def render_recommendation_panel() -> None:
         st.caption("Click **Get recommendation** to generate an output (stubbed for now).")
         return
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Action", rec["action"])
-    c2.metric("Direction", rec["direction"])
-    c3.metric("Confidence", f"{int(rec['confidence'] * 100)}%")
+    st.markdown("### Agent Input (Market Context)")
+    st.code(json.dumps(rec, indent=2))
 
-    st.write(rec["explanation"])
+    # c1, c2, c3 = st.columns(3)
+    # c1.metric("Action", rec["action"])
+    # c2.metric("Direction", rec["direction"])
+    # c3.metric("Confidence", f"{int(rec['confidence'] * 100)}%")
 
-    with st.expander("Agent breakdown", expanded=True):
-        for a in rec["agents"]:
-            st.markdown(f"**{a['agent']}** — {a['output']}")
-            st.caption(a["reason"])
+    # st.write(rec["explanation"])
+
+    # with st.expander("Agent breakdown", expanded=True):
+    #     for a in rec["agents"]:
+    #         st.markdown(f"**{a['agent']}** — {a['output']}")
+    #         st.caption(a["reason"])
 
 
 def render_right_panel() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 import requests
+import json
 
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
