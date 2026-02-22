@@ -19,6 +19,7 @@ from src.agents.market_context import build_market_context
 from src.agents.rules_agent import run_rules_agent_sync
 from src.agents.risk_agent import run_risk_agent
 from src.agents.pricing_baseline_agent import run_pricing_baseline_agent
+from src.agents.news_event_agent import run_news_event_agent_sync
 
 # ----------------------------
 # State helpers
@@ -271,6 +272,12 @@ def generate_recommendation() -> dict:
     # ----------------------------
     pricing_out = run_pricing_baseline_agent(ctx)  # deterministic direction baseline
     agent_outputs.append(pricing_out)
+
+    # ----------------------------
+    # News Event Agent
+    # ----------------------------
+    news_out = run_news_event_agent_sync(ctx)  # news sentiment analysis
+    agent_outputs.append(news_out)
 
     # Example future additions:
     # trend_out = run_trend_agent(ctx)                 # uses candle history

@@ -83,6 +83,29 @@ Acts as a market-implied reference signal before more advanced agents (Trend/Evi
 
 ---
 
+## NewsEventAgent (LLM-Based)  
+Type: Directional Agent  
+
+Purpose:  
+Fetches recent news articles related to the market event and analyzes their sentiment to determine trading direction.
+
+Main Functionality:
+- Searches for news articles using the market title and event ticker.
+- Uses LLM to analyze overall sentiment from the articles.
+- Determines if news sentiment favors YES or NO outcome.
+- Generates confidence score based on sentiment strength.
+
+Returns:
+- action = "BUY" or None
+- direction = "YES", "NO", or None
+- score = confidence in sentiment analysis
+
+Justification:  
+Incorporates real-world news and events that may influence market outcomes.  
+Provides external evidence beyond market pricing and rules analysis.
+
+---
+
 # Aggregation Logic
 
 The system combines agent outputs deterministically:
