@@ -53,10 +53,6 @@ def build_market_context(raw: dict) -> dict:
     if close_dt:
         time_to_close_h = (close_dt - now).total_seconds() / 3600.0
 
-    quote_age_s = None
-    if updated_dt:
-        quote_age_s = (now - updated_dt).total_seconds()
-
     # --- normalize pricing (cents → probability) ---
     yes_ask = _prob_from_cents(raw.get("yes_ask"))
     yes_bid = _prob_from_cents(raw.get("yes_bid"))
@@ -100,7 +96,6 @@ def build_market_context(raw: dict) -> dict:
         "last_price": _prob_from_cents(raw.get("last_price")),
 
         # market stats
-        "liquidity_dollars": float(raw["liquidity_dollars"]) if raw.get("liquidity_dollars") else None,
         "volume": raw.get("volume"),
         "volume_24h": raw.get("volume_24h"),
         "open_interest": raw.get("open_interest"),
@@ -109,7 +104,6 @@ def build_market_context(raw: dict) -> dict:
         "close_time": raw.get("close_time"),
         "updated_time": raw.get("updated_time"),
         "time_to_close_h": time_to_close_h,
-        "quote_age_s": quote_age_s,
 
         # simple derived quality metrics
         "yes_spread": yes_spread,
