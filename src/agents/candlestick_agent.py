@@ -19,7 +19,14 @@ Returns standardized AgentOutput:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import json
+import time
 from typing import Any, Dict, List, Optional, Tuple
+
+import requests
+
+from src.kalshi.client import BASE_URL
 
 
 DEFAULT_THRESHOLDS = {
@@ -94,14 +101,21 @@ def _extract_series(candles: List[Dict[str, Any]]) -> Tuple[List[int], List[floa
     vol: List[int] = []
     oi: List[int] = []
 
-    for c in candles:
-        cl = _safe_float(c.get("close"))
-        if cl is None:
-            continue
-        ts.append(int(c.get("end_ts")))
-        close.append(float(cl))
-        vol.append(int(c.get("volume") or 0))
-        oi.append(int(c.get("open_interest") or 0))
+    for i, c in enumerate(candles):
+        c_next = candles[i + 1] if i + 1 < len(candles) else None
+        c_next_end_ts = c_next.get("end_period_ts") if c_next else None
+        interval = c_next_end_ts - c.get("end_period_ts") if c_next_end_ts and c.get("end_period_ts") else None
+        dups = interval/60 if interval else 0
+        for _ in range(int(dups)):
+            cl = _safe_float(c.get("price").get("close"))
+            if cl is None:
+                cl = _safe_float(c.get("price").get("previous"))
+                if cl is None:
+                    continue
+            ts.append(int(c.get("end_period_ts")))
+            close.append(float(cl))
+            vol.append(int(c.get("volume") or 0))
+            oi.append(int(c.get("open_interest") or 0))
 
     return ts, close, vol, oi
 
@@ -144,16 +158,67 @@ def _compute_volatility(closes: List[float], window: int) -> Optional[float]:
     return _std(rets)
 
 
+def get_trend_candlesticks(ctx, hours = 3, increment = 1):
+    BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+
+    # find the series ticker using get event
+    url = f"{BASE_URL}/events/{ctx.get('event_ticker')}"
+    resp = requests.get(url, timeout=1)
+    if resp.status_code != 200:
+        series_ticker = ""
+    else:
+        event_data = resp.json()
+        series_ticker = event_data.get("event", {}).get("series_ticker", "")
+
+    ticker = ctx.get("ticker")
+    params = {}
+
+    params["start_ts"] = int(time.time() - hours * 60*60)
+    params["end_ts"] = int(time.time())
+    # print(params)
+    params["period_interval"] = increment
+    url = f"{BASE_URL}/series/{series_ticker}/markets/{ticker}/candlesticks"
+    resp = requests.get(url, params=params, timeout=1)
+    candles = resp.json().get("candlesticks", []) 
+    return candles
+
+
 # ----------------------------
 # Main agent
 # ----------------------------
 def run_trend_candles_agent(
     ctx: Dict[str, Any],
-    candles: List[Dict[str, Any]],
     thresholds: Dict[str, Any] = DEFAULT_THRESHOLDS,
 ) -> Dict[str, Any]:
     t = dict(DEFAULT_THRESHOLDS)
     t.update(thresholds or {})
+
+    close_time = ctx.get("close_time")
+    if isinstance(close_time, str):
+        close_time = datetime.fromisoformat(close_time)
+
+    if close_time is not None and close_time.tzinfo is None:
+        close_time = close_time.replace(tzinfo=timezone.utc)
+
+    now = datetime.now(timezone.utc)
+    T = (close_time - now).total_seconds()
+
+    if T > (6 * 60 * 60): 
+        candles = get_trend_candlesticks(ctx, hours=6, increment=60)
+    else:
+        candles = get_trend_candlesticks(ctx, hours=3, increment=1)
+
+    candles = get_trend_candlesticks(ctx)
+    # print(len(candles))
+    # print(json.dumps(candles, indent=2))
+
+    with open("candlesticks.json", "w") as f:
+        json.dump(candles, f, indent=2)
+
+    # print( int(time.time() - 3 * 60*60))
+    # print(json.dumps(candles[0], indent=2))
+    # print(json.dumps(candles[-1], indent=2))
+    # print(time.time())
 
     ticker = (ctx.get("ticker") or "").strip()
     if not ticker:
@@ -166,16 +231,16 @@ def run_trend_candles_agent(
             "signals": {"missing": ["ticker"]},
         }
 
-    if not candles:
-        return {
-            "agent": "TrendCandlesAgent",
-            "action": None,
-            "direction": None,
-            "score": 0.3,
-            "reason": "No candlestick data provided.",
-            "signals": {"n": 0},
-        }
-
+    # if not candles:
+    #     return {
+    #         "agent": "TrendCandlesAgent",
+    #         "action": None,
+    #         "direction": None,
+    #         "score": 0.3,
+    #         "reason": "No candlestick data provided.",
+    #         "signals": {"n": 0},
+    #     }
+    
     ts, closes, volumes, open_interests = _extract_series(candles)
 
     if len(closes) < int(t["min_candles"]):
@@ -186,7 +251,7 @@ def run_trend_candles_agent(
             "score": 0.4,
             "reason": f"Insufficient candlestick history (n={len(closes)}).",
             "signals": {"n": len(closes), "min_candles": int(t["min_candles"])},
-            "raw": {"candles_n_raw": len(candles)},
+            "raw": {"candles_n_raw": len(candles), },
         }
 
     # compute indicators
@@ -305,5 +370,7 @@ def run_trend_candles_agent(
         "raw": {
             "last_5_closes": closes[-5:],
             "last_5_volumes": volumes[-5:],
+            "time_interval_used": "hr" if T > (6 * 60 * 60) else "min",
+
         },
     }

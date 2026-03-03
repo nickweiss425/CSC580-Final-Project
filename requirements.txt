@@ -7,3 +7,5 @@ autogen-ext
 newsapi-python
 openai
 tiktoken
+duckdb
+scikit-learn

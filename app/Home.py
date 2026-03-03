@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 import json
 
+
 # add project root to Python path
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT_DIR))
@@ -20,6 +21,43 @@ from src.agents.rules_agent import run_rules_agent_sync
 from src.agents.risk_agent import run_risk_agent
 from src.agents.pricing_baseline_agent import run_pricing_baseline_agent
 from src.agents.news_event_agent import run_news_event_agent_sync
+
+from src.agents.candlestick_agent import run_trend_candles_agent
+from src.agents.candlestick_agent_gpt import run_trend_candles_agent_gpt_sync
+from src.agents.historical_agent import run_historical_agent
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import traceback
+
+
+def _safe_agent_call(agent_name: str, fn, *args, **kwargs) -> dict:
+    """
+    Run an agent function safely in a thread.
+    Never calls Streamlit APIs. Always returns a dict-shaped agent output.
+    """
+    try:
+        out = fn(*args, **kwargs)
+        if not isinstance(out, dict):
+            return {
+                "agent": agent_name,
+                "action": "NO_TRADE",
+                "direction": None,
+                "score": 0.0,
+                "reason": f"{agent_name} returned non-dict output: {type(out)}",
+                "signals": {},
+            }
+        out.setdefault("agent", agent_name)
+        return out
+    except Exception as e:
+        tb = traceback.format_exc(limit=5)
+        return {
+            "agent": agent_name,
+            "action": "NO_TRADE",
+            "direction": None,
+            "score": 0.0,
+            "reason": f"{agent_name} crashed: {e}",
+            "signals": {"traceback": tb},
+        }
 
 # ----------------------------
 # State helpers
@@ -217,18 +255,142 @@ def render_market_details(selected_market: dict) -> None:
 
 
 
-def generate_recommendation() -> dict:
-    """
-    Run the end-to-end recommendation pipeline for the selected market.
+# def generate_recommendation() -> dict:
+#     """
+#     Run the end-to-end recommendation pipeline for the selected market.
 
-    Steps:
-      1) Build MarketContext (ctx)
-      2) Run RulesAgent (semantic clarity + possible veto)
-      3) Enrich ctx with semantics (ctx_enriched)
-      4) Run RiskAgent (deterministic execution-risk veto)
-      5) Run directional agents (Pricing/Trend/Evidence)
-      6) Aggregate agent outputs into final recommendation
-    """
+#     Steps:
+#       1) Build MarketContext (ctx)
+#       2) Run RulesAgent (semantic clarity + possible veto)
+#       3) Enrich ctx with semantics (ctx_enriched)
+#       4) Run RiskAgent (deterministic execution-risk veto)
+#       5) Run directional agents (Pricing/Trend/Evidence)
+#       6) Aggregate agent outputs into final recommendation
+#     """
+#     selected_market = get_selected_market()
+#     if not selected_market:
+#         return {
+#             "action": "NO_TRADE",
+#             "direction": None,
+#             "confidence": 0.0,
+#             "explanation": "No market selected.",
+#             "agents": [],
+#         }
+
+#     # build standardized context
+#     ctx = build_market_context(selected_market)
+
+#     agent_outputs = []
+
+#     # ----------------------------
+#     # RulesAgent (LLM): semantics + clarity gate
+#     # ----------------------------
+#     rules_out = run_rules_agent_sync(ctx)
+#     agent_outputs.append(rules_out)
+
+#     # enrich context for downstream semantic agents
+#     rules_sig = rules_out.get("signals", {}) or {}
+#     ctx_enriched = dict(ctx)
+#     ctx_enriched["semantics"] = {
+#         "yes_means": rules_sig.get("yes_means", ""),
+#         "no_means": rules_sig.get("no_means", ""),
+#         "clarity_score": float(rules_out.get("score", 0.0) or 0.0),
+#         "ambiguity_flags": rules_sig.get("ambiguity_flags", []) or [],
+#         "notes": rules_sig.get("notes", ""),
+#     }
+
+#     # ----------------------------
+#     # RiskAgent (deterministic)
+#     # ----------------------------
+#     risk_out = run_risk_agent(ctx)
+#     agent_outputs.append(risk_out)
+
+#     # ----------------------------
+#     # Directional agents (ADD NEW AGENTS HERE!!!!)
+#     # ----------------------------
+#     pricing_out = run_pricing_baseline_agent(ctx)  # deterministic direction baseline
+#     agent_outputs.append(pricing_out)
+
+#     # ----------------------------
+#     # News Event Agent
+#     # ----------------------------
+#     news_out = run_news_event_agent_sync(ctx)  # news sentiment analysis
+#     agent_outputs.append(news_out)
+
+#     # ----------------------------
+#     # Candlestick/Trend Agent
+#     # ----------------------------
+#     # print(ctx)
+#     candlestick_out = run_trend_candles_agent(ctx,{})  # placeholder for future trend agent
+#     agent_outputs.append(candlestick_out)
+
+
+#     # GPT version
+#     candlestick_out_gpt = run_trend_candles_agent_gpt_sync(ctx)  # placeholder for future trend agent
+#     print("Candlestick Agent (GPT) output:")
+#     print(candlestick_out_gpt)
+#     agent_outputs.append(candlestick_out_gpt)
+
+#     # Example future additions:
+#     # trend_out = run_trend_agent(ctx)                 # uses candle history
+#     # evidence_out = run_evidence_agent_sync(ctx_enriched)  # uses semantics + web
+#     # agent_outputs.extend([trend_out, evidence_out])
+
+#     # ----------------------------
+#     # Aggregation
+#     # ----------------------------
+
+#     # any veto => NO_TRADE
+#     vetoes = [o for o in agent_outputs if o.get("action") == "NO_TRADE"]
+#     if vetoes:
+#         confidence = min(float(o.get("score", 0.0) or 0.0) for o in vetoes)
+#         explanation = " | ".join(o.get("reason", "") for o in vetoes if o.get("reason"))
+#         return {
+#             "action": "NO_TRADE",
+#             "direction": None,
+#             "confidence": confidence,
+#             "explanation": explanation or "One or more agents vetoed this market.",
+#             "agents": agent_outputs,
+#         }
+
+#     # collect directional BUY votes (YES/NO)
+#     buy_votes = [
+#         o for o in agent_outputs
+#         if o.get("action") == "BUY" and o.get("direction") in ("YES", "NO")
+#     ]
+
+#     # if no one voted to BUY, default to NO_TRADE (or READY)
+#     if not buy_votes:
+#         confidence = min(float(o.get("score", 1.0) or 1.0) for o in agent_outputs)
+#         explanation = " | ".join(o.get("reason", "") for o in agent_outputs if o.get("reason"))
+#         return {
+#             "action": "NO_TRADE",
+#             "direction": None,
+#             "confidence": confidence,
+#             "explanation": explanation or "No agent recommended a trade.",
+#             "agents": agent_outputs,
+#         }
+
+#     # pick the strongest vote (highest score)
+#     best_vote = max(buy_votes, key=lambda o: float(o.get("score", 0.0) or 0.0))
+#     direction = best_vote["direction"]
+
+#     # confidence: min of all agent scores, but treat None/missing as 1.0
+#     confidence = min(float(o.get("score", 1.0) or 1.0) for o in agent_outputs)
+
+#     # explanation: short combined reasons
+#     explanation = " | ".join(o.get("reason", "") for o in agent_outputs if o.get("reason"))
+
+#     return {
+#         "action": "BUY",
+#         "direction": direction,
+#         "confidence": confidence,
+#         "explanation": explanation or f"Direction chosen by {best_vote.get('agent','a directional agent')}.",
+#         "agents": agent_outputs,
+#     }
+
+
+def generate_recommendation() -> dict:
     selected_market = get_selected_market()
     if not selected_market:
         return {
@@ -239,18 +401,15 @@ def generate_recommendation() -> dict:
             "agents": [],
         }
 
-    # build standardized context
     ctx = build_market_context(selected_market)
-
-    agent_outputs = []
+    agent_outputs: list[dict] = []
 
     # ----------------------------
-    # RulesAgent (LLM): semantics + clarity gate
+    # Stage 1: RulesAgent first (dependency anchor)
     # ----------------------------
-    rules_out = run_rules_agent_sync(ctx)
+    rules_out = _safe_agent_call("RulesAgent", run_rules_agent_sync, ctx)
     agent_outputs.append(rules_out)
 
-    # enrich context for downstream semantic agents
     rules_sig = rules_out.get("signals", {}) or {}
     ctx_enriched = dict(ctx)
     ctx_enriched["semantics"] = {
@@ -262,33 +421,41 @@ def generate_recommendation() -> dict:
     }
 
     # ----------------------------
-    # RiskAgent (deterministic)
+    # Stage 2: Run independent agents concurrently
     # ----------------------------
-    risk_out = run_risk_agent(ctx)
-    agent_outputs.append(risk_out)
+    # Tune this: I/O bound => more threads is usually fine
+    max_workers = 6
+
+    futures = []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        # deterministic risk gate
+        futures.append(ex.submit(_safe_agent_call, "RiskAgent", run_risk_agent, ctx))
+
+        # deterministic baseline
+        futures.append(ex.submit(_safe_agent_call, "PricingBaselineAgent", run_pricing_baseline_agent, ctx))
+
+        # news (likely I/O bound)
+        futures.append(ex.submit(_safe_agent_call, "NewsEventAgent", run_news_event_agent_sync, ctx))
+
+        # candlesticks (your local LLM / parsing etc.)
+        futures.append(ex.submit(_safe_agent_call, "CandlestickAgent", run_trend_candles_agent, ctx, {}))
+
+        # gpt candlesticks
+        futures.append(ex.submit(_safe_agent_call, "CandlestickAgentGPT", run_trend_candles_agent_gpt_sync, ctx))
+
+        # historical agent 
+        futures.append(ex.submit(_safe_agent_call, "HistoricalAgent", run_historical_agent, ctx))
+
+        # If you later add something that depends on ctx_enriched:
+        # futures.append(ex.submit(_safe_agent_call, "EvidenceAgent", run_evidence_agent_sync, ctx_enriched))
+
+        for fut in as_completed(futures):
+            agent_outputs.append(fut.result())
 
     # ----------------------------
-    # Directional agents (ADD NEW AGENTS HERE!!!!)
-    # ----------------------------
-    pricing_out = run_pricing_baseline_agent(ctx)  # deterministic direction baseline
-    agent_outputs.append(pricing_out)
-
-    # ----------------------------
-    # News Event Agent
-    # ----------------------------
-    news_out = run_news_event_agent_sync(ctx)  # news sentiment analysis
-    agent_outputs.append(news_out)
-
-    # Example future additions:
-    # trend_out = run_trend_agent(ctx)                 # uses candle history
-    # evidence_out = run_evidence_agent_sync(ctx_enriched)  # uses semantics + web
-    # agent_outputs.extend([trend_out, evidence_out])
-
-    # ----------------------------
-    # Aggregation
+    # Aggregation (your existing logic)
     # ----------------------------
 
-    # any veto => NO_TRADE
     vetoes = [o for o in agent_outputs if o.get("action") == "NO_TRADE"]
     if vetoes:
         confidence = min(float(o.get("score", 0.0) or 0.0) for o in vetoes)
@@ -301,13 +468,11 @@ def generate_recommendation() -> dict:
             "agents": agent_outputs,
         }
 
-    # collect directional BUY votes (YES/NO)
     buy_votes = [
         o for o in agent_outputs
         if o.get("action") == "BUY" and o.get("direction") in ("YES", "NO")
     ]
 
-    # if no one voted to BUY, default to NO_TRADE (or READY)
     if not buy_votes:
         confidence = min(float(o.get("score", 1.0) or 1.0) for o in agent_outputs)
         explanation = " | ".join(o.get("reason", "") for o in agent_outputs if o.get("reason"))
@@ -319,14 +484,10 @@ def generate_recommendation() -> dict:
             "agents": agent_outputs,
         }
 
-    # pick the strongest vote (highest score)
     best_vote = max(buy_votes, key=lambda o: float(o.get("score", 0.0) or 0.0))
     direction = best_vote["direction"]
 
-    # confidence: min of all agent scores, but treat None/missing as 1.0
     confidence = min(float(o.get("score", 1.0) or 1.0) for o in agent_outputs)
-
-    # explanation: short combined reasons
     explanation = " | ".join(o.get("reason", "") for o in agent_outputs if o.get("reason"))
 
     return {
@@ -338,8 +499,6 @@ def generate_recommendation() -> dict:
     }
 
 
-
-
 def render_recommendation_panel() -> None:
     st.divider()
     st.subheader("Recommendation")
@@ -347,8 +506,9 @@ def render_recommendation_panel() -> None:
     get_rec = st.button("Get recommendation", type="primary")
 
     if get_rec:
-        st.session_state.recommendation = generate_recommendation()
-
+        with st.spinner("Running agents..."):
+            st.session_state.recommendation = generate_recommendation()
+            
     rec = st.session_state.recommendation
     if rec is None:
         st.caption("Click **Get recommendation** to generate an output (stubbed for now).")
