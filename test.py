@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 import json
+from time import time
 
 
 # add project root to Python path
@@ -10,6 +11,7 @@ sys.path.append(str(ROOT_DIR))
 
 import streamlit as st
 from src.kalshi.client import (
+    fetch_candlesticks,
     fetch_markets,
     normalize_markets,
     search_markets_progressive,
@@ -20,7 +22,8 @@ from src.agents.market_context import build_market_context
 from src.agents.rules_agent import run_rules_agent_sync
 from src.agents.risk_agent import run_risk_agent
 from src.agents.pricing_baseline_agent import run_pricing_baseline_agent
-from src.agents.news_event_agent import run_news_event_agent_sync
+# from src.agents.news_event_agent import run_news_event_agent_sync
+from src.agents.news_evidence_agent import run_news_evidence_agent_sync
 
 from src.agents.candlestick_agent import run_trend_candles_agent
 from src.agents.candlestick_agent_gpt import run_trend_candles_agent_gpt_sync
@@ -47,10 +50,18 @@ def run_test_agent(agent_name, ticker):
         return run_risk_agent(ctx)
     elif agent_name == "PricingBaselineAgent":
         return run_pricing_baseline_agent(ctx)
-    elif agent_name == "NewsEventAgent":
-        return run_news_event_agent_sync(ctx)
+    elif agent_name == "NewsEvidenceAgent":
+        return run_news_evidence_agent_sync(ctx)
     elif agent_name == "CandlestickAgent":
-        return run_trend_candles_agent(ctx)
+        end_ts = int(time.time())
+        start_ts = end_ts - 14 * 24 * 3600
+        candles = fetch_candlesticks(
+            market_ticker=ctx["ticker"],
+            start_ts=start_ts,
+            end_ts=end_ts,
+            period_interval=60,
+        )
+        return run_trend_candles_agent(ctx, candles=candles )
     elif agent_name == "CandlestickAgentGPT":
         return run_trend_candles_agent_gpt_sync(ctx)
     elif agent_name == "HistoricalAgent":
@@ -59,8 +70,8 @@ def run_test_agent(agent_name, ticker):
         raise ValueError(f"Unknown agent name: {agent_name}")
     
 if __name__ == "__main__":
-    agent_name = "CandlestickAgent"  # Change this to test different agents
-    ticker = "KXHIGHNY-26MAR03-T39"  # Change this to test different tickers
+    agent_name = "HistoricalAgent"  # Change this to test different agents
+    ticker = "KXNBAGAME-26MAR03NYKTOR-NYK"  # Change this to test different tickers
 
 
     try:

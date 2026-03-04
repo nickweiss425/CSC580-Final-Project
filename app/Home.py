@@ -1,15 +1,10 @@
-# Streamlit app (UI improvements for nicer results display)
-# Key changes:
-# - Store ctx_enriched in session_state so it can be shown
-# - Show a clear "Final Decision" card (action/direction/confidence + explanation)
-# - Add agent breakdown as readable cards with signals + optional raw JSON
-# - Keep raw JSON in an expander for debugging
-
 import sys
 from pathlib import Path
-import json
+import time
+import queue
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# add project root to Python path
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT_DIR))
 
@@ -29,81 +24,8 @@ from src.agents.pricing_baseline_agent import run_pricing_baseline_agent
 from src.agents.news_evidence_agent import run_news_evidence_agent_sync
 from src.agents.candlestick_agent import run_trend_candles_agent
 from src.agents.aggregation_agent import aggregate_recommendation_sync
-
-
-from src.agents.candlestick_agent import run_trend_candles_agent
-from src.agents.candlestick_agent_gpt import run_trend_candles_agent_gpt_sync
 from src.agents.historical_agent import run_historical_agent
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import traceback
-
-
-def _safe_agent_call(agent_name: str, fn, *args, **kwargs) -> dict:
-    """
-    Run an agent function safely in a thread.
-    Never calls Streamlit APIs. Always returns a dict-shaped agent output.
-    """
-    try:
-        out = fn(*args, **kwargs)
-        if not isinstance(out, dict):
-            return {
-                "agent": agent_name,
-                "action": "NO_TRADE",
-                "direction": None,
-                "score": 0.0,
-                "reason": f"{agent_name} returned non-dict output: {type(out)}",
-                "signals": {},
-            }
-        out.setdefault("agent", agent_name)
-        return out
-    except Exception as e:
-        tb = traceback.format_exc(limit=5)
-        return {
-            "agent": agent_name,
-            "action": "NO_TRADE",
-            "direction": None,
-            "score": 0.0,
-            "reason": f"{agent_name} crashed: {e}",
-            "signals": {"traceback": tb},
-        }
-
-from src.agents.candlestick_agent import run_trend_candles_agent
-from src.agents.candlestick_agent_gpt import run_trend_candles_agent_gpt_sync
-from src.agents.historical_agent import run_historical_agent
-
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import traceback
-
-
-def _safe_agent_call(agent_name: str, fn, *args, **kwargs) -> dict:
-    """
-    Run an agent function safely in a thread.
-    Never calls Streamlit APIs. Always returns a dict-shaped agent output.
-    """
-    try:
-        out = fn(*args, **kwargs)
-        if not isinstance(out, dict):
-            return {
-                "agent": agent_name,
-                "action": "NO_TRADE",
-                "direction": None,
-                "score": 0.0,
-                "reason": f"{agent_name} returned non-dict output: {type(out)}",
-                "signals": {},
-            }
-        out.setdefault("agent", agent_name)
-        return out
-    except Exception as e:
-        tb = traceback.format_exc(limit=5)
-        return {
-            "agent": agent_name,
-            "action": "NO_TRADE",
-            "direction": None,
-            "score": 0.0,
-            "reason": f"{agent_name} crashed: {e}",
-            "signals": {"traceback": tb},
-        }
 
 # ----------------------------
 # State helpers
@@ -111,22 +33,21 @@ def _safe_agent_call(agent_name: str, fn, *args, **kwargs) -> dict:
 def init_state() -> None:
     if "selected_market_id" not in st.session_state:
         st.session_state.selected_market_id = None
-
     if "market_results" not in st.session_state:
         st.session_state.market_results = get_markets_cached(limit=200)
-
     if "recommendation" not in st.session_state:
         st.session_state.recommendation = None
-
-    # store last ctx for display/debug
     if "last_ctx" not in st.session_state:
         st.session_state.last_ctx = None
+    if "agent_results" not in st.session_state:
+        st.session_state.agent_results = []
 
 
 def reset_selection_and_recommendation() -> None:
     st.session_state.selected_market_id = None
     st.session_state.recommendation = None
     st.session_state.last_ctx = None
+    st.session_state.agent_results = []
 
 
 def set_market_results(results: list[dict]) -> None:
@@ -184,6 +105,7 @@ def render_market_browser() -> None:
         st.session_state.selected_market_id = options[0]
         st.session_state.recommendation = None
         st.session_state.last_ctx = None
+        st.session_state.agent_results = []
 
     def fmt(mid: str) -> str:
         for m in results:
@@ -201,7 +123,7 @@ def render_market_browser() -> None:
 
 
 # ----------------------------
-# UI: Right panel
+# UI: Right panel helpers
 # ----------------------------
 def get_selected_market() -> dict | None:
     selected_id = st.session_state.get("selected_market_id")
@@ -213,11 +135,9 @@ def get_selected_market() -> dict | None:
 
 def render_market_details(selected_market: dict) -> None:
     st.subheader("Market Details")
-
     st.markdown(f"**Market ID:** `{selected_market.get('ticker')}`")
     st.markdown(f"**Title:** {selected_market.get('title')}")
     st.caption(selected_market.get("list_title", ""))
-
     st.divider()
 
     c1, c2 = st.columns(2)
@@ -247,7 +167,6 @@ def _fmt_conf(x: object) -> str:
 
 
 def _chip_action(action: str) -> str:
-    # lightweight "badge" using markdown
     if action == "BUY":
         return "✅ **BUY**"
     if action == "NO_TRADE":
@@ -255,97 +174,104 @@ def _chip_action(action: str) -> str:
     return f"**{action or '—'}**"
 
 
-def _agent_card(a: dict) -> None:
-    agent = a.get("agent", "UnknownAgent")
-    action = a.get("action")
-    direction = a.get("direction")
-    score = a.get("score")
+def _render_agent_card(container, a: dict) -> None:
+    """Render a completed agent result card into the given container."""
+    with container:
+        agent = a.get("agent", "UnknownAgent")
+        action = a.get("action")
+        direction = a.get("direction")
+        score = a.get("score")
+        error = a.get("error")
 
-    header_cols = st.columns([1.4, 1, 1, 1])
-    header_cols[0].markdown(f"**{agent}**")
-    header_cols[1].markdown(f"Action: `{action or '—'}`")
-    header_cols[2].markdown(f"Dir: `{direction or '—'}`")
-    header_cols[3].markdown(f"Score: `{score if score is not None else '—'}`")
+        header_cols = st.columns([1.4, 1, 1, 1])
+        header_cols[0].markdown(f"**{agent}**")
+        header_cols[1].markdown(f"Action: `{action or '—'}`")
+        header_cols[2].markdown(f"Dir: `{direction or '—'}`")
+        header_cols[3].markdown(f"Score: `{score if score is not None else '—'}`")
 
-    reason = a.get("reason") or ""
-    if reason:
-        st.caption(reason)
+        if error:
+            st.error(f"Agent error: {error}")
 
-    signals = a.get("signals") or {}
-    if isinstance(signals, dict) and signals:
-        with st.expander("Signals", expanded=False):
-            st.json(signals)
+        reason = a.get("reason") or ""
+        if reason:
+            st.caption(reason)
 
-    raw = a.get("raw")
-    if raw is not None:
-        with st.expander("Raw (debug)", expanded=False):
-            st.json(raw)
+        signals = a.get("signals") or {}
+        if isinstance(signals, dict) and signals:
+            with st.expander("Signals", expanded=False):
+                st.json(signals)
 
-
-def generate_recommendation() -> dict:
-    selected_market = get_selected_market()
-    if not selected_market:
-        return {
-            "action": "NO_TRADE",
-            "direction": None,
-            "confidence": 0.0,
-            "explanation": "No market selected.",
-            "agents": [],
-        }
-
-    ctx = build_market_context(selected_market)
-
-    agent_outputs = []
-
-    # ----------------------------
-    # RulesAgent (LLM): semantics + clarity gate
-    # ----------------------------
-    rules_out = run_rules_agent_sync(ctx)
-    agent_outputs.append(rules_out)
-
-    # enrich context for downstream semantic agents
-    rules_sig = rules_out.get("signals", {}) or {}
-    ctx_enriched = dict(ctx)
-    ctx_enriched["semantics"] = {
-        "yes_means": rules_sig.get("yes_means", ""),
-        "no_means": rules_sig.get("no_means", ""),
-        "clarity_score": float(rules_out.get("score", 0.0) or 0.0),
-        "ambiguity_flags": rules_sig.get("ambiguity_flags", []) or [],
-        "notes": rules_sig.get("notes", ""),
-    }
-
-    # store context for UI
-    st.session_state.last_ctx = ctx_enriched
-
-    # Candles -> TrendCandlesAgent
-    end_ts = int(time.time())
-    start_ts = end_ts - 14 * 24 * 3600
-    candles = fetch_candlesticks(
-        market_ticker=ctx["ticker"],
-        start_ts=start_ts,
-        end_ts=end_ts,
-        period_interval=60,
-    )
-    candlestick_agent_out = run_trend_candles_agent(ctx, candles)
-    agent_outputs.append(candlestick_agent_out)
-
-    # RiskAgent
-    risk_out = run_risk_agent(ctx)
-    agent_outputs.append(risk_out)
-
-    # PricingBaselineAgent
-    pricing_out = run_pricing_baseline_agent(ctx)
-    agent_outputs.append(pricing_out)
-
-    # NewsEvidenceAgent
-    news_out = run_news_evidence_agent_sync(ctx)
-    agent_outputs.append(news_out)
-
-    # Aggregation (LLM)
-    final = aggregate_recommendation_sync(ctx_enriched, agent_outputs)
-    return final
+        raw = a.get("raw")
+        if raw is not None:
+            with st.expander("Raw (debug)", expanded=False):
+                st.json(raw)
 
 
+# ----------------------------
+# Agent runner helpers
+# ----------------------------
+def _run_rules_agent(ctx: dict) -> dict:
+    try:
+        return run_rules_agent_sync(ctx)
+    except Exception as e:
+        return {"agent": "RulesAgent", "action": "NO_TRADE", "error": str(e)}
+
+
+def _run_candlestick_agent(ctx: dict) -> dict:
+    try:
+        end_ts = int(time.time())
+        start_ts = end_ts - 14 * 24 * 3600
+        candles = fetch_candlesticks(
+            market_ticker=ctx["ticker"],
+            start_ts=start_ts,
+            end_ts=end_ts,
+            period_interval=60,
+        )
+        return run_trend_candles_agent(ctx, candles)
+    except Exception as e:
+        return {"agent": "CandlestickAgent", "action": "NO_TRADE", "error": str(e)}
+
+
+def _run_risk_agent(ctx: dict) -> dict:
+    try:
+        return run_risk_agent(ctx)
+    except Exception as e:
+        return {"agent": "RiskAgent", "action": "NO_TRADE", "error": str(e)}
+
+
+def _run_pricing_agent(ctx: dict) -> dict:
+    try:
+        return run_pricing_baseline_agent(ctx)
+    except Exception as e:
+        return {"agent": "PricingBaselineAgent", "action": "NO_TRADE", "error": str(e)}
+
+
+def _run_news_agent(ctx: dict) -> dict:
+    try:
+        return run_news_evidence_agent_sync(ctx)
+    except Exception as e:
+        return {"agent": "NewsEvidenceAgent", "action": "NO_TRADE", "error": str(e)}
+
+
+def _run_historical_agent(ctx: dict) -> dict:
+    try:
+        return run_historical_agent(ctx)
+    except Exception as e:
+        return {"agent": "HistoricalAgent", "action": "NO_TRADE", "error": str(e)}
+
+# Ordered list of parallel agents: (display_name, runner_fn)
+PARALLEL_AGENTS: list[tuple[str, callable]] = [
+    ("CandlestickAgent", _run_candlestick_agent),
+    ("RiskAgent",        _run_risk_agent),
+    ("PricingAgent",     _run_pricing_agent),
+    ("NewsAgent",        _run_news_agent),
+    ("HistoricalAgent",   _run_historical_agent),
+]
+
+
+# ----------------------------
+# Recommendation panel (live streaming)
+# ----------------------------
 def render_recommendation_panel() -> None:
     st.divider()
     st.subheader("Recommendation")
@@ -353,15 +279,113 @@ def render_recommendation_panel() -> None:
     get_rec = st.button("Get recommendation", type="primary", use_container_width=True)
 
     if get_rec:
-        with st.spinner("Running agents..."):
-            st.session_state.recommendation = generate_recommendation()
+        st.session_state.agent_results = []
+        st.session_state.recommendation = None
 
+        selected_market = get_selected_market()
+        if not selected_market:
+            st.warning("No market selected.")
+            return
+
+        ctx = build_market_context(selected_market)
+
+        st.markdown("### Agent Breakdown")
+
+        # ── Step 1: RulesAgent (must run first to build ctx_enriched) ──
+        rules_placeholder = st.empty()
+        rules_placeholder.container(border=True).markdown("⏳ **RulesAgent** — *running...*")
+
+        rules_out = _run_rules_agent(ctx)
+
+        # Replace pending card with real result
+        rules_placeholder.empty()
+        with rules_placeholder.container(border=True):
+            _render_agent_card(st.container(), rules_out)
+
+        # Build enriched context from rules output
+        rules_sig = rules_out.get("signals", {}) or {}
+        ctx_enriched = dict(ctx)
+        ctx_enriched["semantics"] = {
+            "yes_means": rules_sig.get("yes_means", ""),
+            "no_means": rules_sig.get("no_means", ""),
+            "clarity_score": float(rules_out.get("score", 0.0) or 0.0),
+            "ambiguity_flags": rules_sig.get("ambiguity_flags", []) or [],
+            "notes": rules_sig.get("notes", ""),
+        }
+        st.session_state.last_ctx = ctx_enriched
+        st.session_state.agent_results = [rules_out]
+
+        # ── Step 2: Pre-render "pending" cards for each parallel agent ──
+        agent_placeholders: dict[str, st.delta_generator.DeltaGenerator] = {}
+        for display_name, _ in PARALLEL_AGENTS:
+            ph = st.empty()
+            ph.container(border=True).markdown(f"⏳ **{display_name}** — *running...*")
+            agent_placeholders[display_name] = ph
+
+        # ── Step 3: Launch parallel agents into background threads ──
+        result_queue: queue.Queue = queue.Queue()
+
+        def _run_and_enqueue(display_name: str, fn, ctx: dict) -> None:
+            result = fn(ctx)
+            result_queue.put((display_name, result))
+
+        threads = []
+        for display_name, fn in PARALLEL_AGENTS:
+            t = threading.Thread(
+                target=_run_and_enqueue,
+                args=(display_name, fn, ctx_enriched),
+                daemon=True,
+            )
+            t.start()
+            threads.append(t)
+
+        # ── Step 4: Poll queue — update each card as its agent finishes ──
+        parallel_results: dict[str, dict] = {}
+        total = len(PARALLEL_AGENTS)
+
+        while len(parallel_results) < total:
+            try:
+                display_name, result = result_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+
+            parallel_results[display_name] = result
+            ph = agent_placeholders[display_name]
+            ph.empty()
+            with ph.container(border=True):
+                _render_agent_card(st.container(), result)
+
+        for t in threads:
+            t.join()
+
+        # Append in stable display order
+        for display_name, _ in PARALLEL_AGENTS:
+            st.session_state.agent_results.append(parallel_results[display_name])
+
+        # ── Step 5: Aggregation (runs only after all agents are done) ──
+        agg_status = st.empty()
+        agg_status.info("⚙️ Aggregating all agent results...")
+
+        final = aggregate_recommendation_sync(ctx_enriched, st.session_state.agent_results)
+        st.session_state.recommendation = final
+        agg_status.empty()
+
+    # ── Persistent render: show stored results after reruns ──
     rec = st.session_state.recommendation
+    agent_results = st.session_state.agent_results
+
+    if not get_rec and agent_results:
+        st.markdown("### Agent Breakdown")
+        for a in agent_results:
+            with st.container(border=True):
+                _render_agent_card(st.container(), a)
+
     if rec is None:
-        st.caption("Click **Get recommendation** to generate an output.")
+        if not agent_results:
+            st.caption("Click **Get recommendation** to generate an output.")
         return
 
-    # --- Final decision summary ---
+    # ── Final decision card ──
     st.markdown("### Final Decision")
     s1, s2, s3 = st.columns([1, 1, 1])
     s1.markdown(_chip_action(rec.get("action")))
@@ -372,19 +396,6 @@ def render_recommendation_panel() -> None:
     if explanation:
         st.info(explanation)
 
-    # --- Agent breakdown ---
-    agents = rec.get("agents") or []
-    st.markdown("### Agent Breakdown")
-    if not agents:
-        st.caption("No agent outputs attached.")
-    else:
-        # show in a stable order (optional)
-        # If you want strict ordering, you can define a preferred list.
-        for a in agents:
-            with st.container(border=True):
-                _agent_card(a)
-
-    # --- Debug: context + full JSON ---
     with st.expander("Debug (context + full JSON)", expanded=False):
         st.markdown("**Market Context (ctx_enriched)**")
         st.json(st.session_state.get("last_ctx"))
@@ -408,7 +419,6 @@ def render_right_panel() -> None:
 # ----------------------------
 def main() -> None:
     st.set_page_config(page_title="Prediction Market Assistant (Demo)", layout="wide")
-
     init_state()
 
     st.title("Prediction Market Decision Support")

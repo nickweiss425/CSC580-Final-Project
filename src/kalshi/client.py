@@ -243,7 +243,3 @@ def fetch_candlesticks(
 
     candles.sort(key=lambda x: x["end_ts"])
     return candles
-
-
-
-

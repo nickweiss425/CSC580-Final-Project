@@ -293,17 +293,26 @@ def train_mini_model(cohort):
         FROM trade_metrics
         WHERE time_to_close > 0
     """
-    
+
+    query2 = f"""
+    SELECT m.result, t.ticker
+    FROM '{TRADES}' t
+    JOIN '{MARKETS}' m ON t.ticker = m.ticker
+    WHERE t.ticker IN (SELECT unnest($candidate_tickers))
+    """
+    df2 = con.execute(query2, {"candidate_tickers": candidate_tickers}).df()
+    print(df2.head())
     df = con.execute(query, {"candidate_tickers": candidate_tickers}).df()
+    print(df.head())
 
     if df.empty or len(df) < 20:
         print("!!! Insufficient data to train/test model.")
-        return None, 0
+        return None, 0, 0, 0.0, 1.0
 
     # Ensure we have both classes in our target
     if len(df['label'].unique()) < 2:
         print("!!! Data contains only one outcome class. Cannot validate.")
-        return None, len(df)
+        return None, len(df), 0, 0.0, 1.0
 
     # 1. Feature Selection
     X = df[['price', 'log_liq', 'log_ttc']]
@@ -353,13 +362,6 @@ def get_model_signal(model, current_price, current_liq, current_ttc):
     
     return prob_yes
 
-
-
-
-
-
-
-
 def evaluate_edge(
     target_market: Dict[str, Any],
     cohort: List[SimilarMarket],
@@ -389,6 +391,8 @@ def evaluate_edge(
             "signals": {},
         }
     model, train_count, test_count, acc, brier = train_mini_model(cohort)
+    if model is None:
+        return None, 0, 0, 0.0, None, None
     prob_yes = get_model_signal(model, yes_ask, liquidity, ttc_h)
     return prob_yes, len(cohort), train_count, test_count, acc, brier
 
@@ -426,11 +430,50 @@ def run_historical_agent(ctx: dict) -> Dict[str, Any]:
     print(len(cohort), "similar markets found for", ticker)
     prob_yes, sim_count, train_count, test_count, acc, brier = evaluate_edge(target, cohort)
     
+    if prob_yes is None:
+        return {
+            "agent": "HistoricalAgent",
+            "action": "NO_TRADE",
+            "direction": None,
+            "score": 0.0,
+            "reason": "Insufficient data to evaluate edge.",
+            "signals": {
+                "current_price": target["yes_ask"],
+                "current_liquidity": target["liquidity"],
+                "current_time_to_close_h": _time_to_close_hours(datetime.fromisoformat(target["close_time"].replace('Z', '+00:00'))),
+            },
+        }
+
+    import math
+    def sigmoid(x): 
+        return 1/(1+math.exp(-x))
+    
+    def clamp01(x): 
+        return max(0.0, min(1.0, x))
+
+    yes_ask = target["yes_ask"]
+    no_ask = target["no_ask"]
+    k = 12  # steepness
+    conf_yes = sigmoid(k * (prob_yes - yes_ask))
+    conf_no  = sigmoid(k * ((1 - prob_yes) - no_ask))
+    conf_yes = clamp01(2*(sigmoid(k*(prob_yes-yes_ask)) - 0.5))
+    conf_no  = clamp01(2*(sigmoid(k*((1-prob_yes)-no_ask)) - 0.5))
+    
+    print(conf_yes, conf_no) 
+    action = "BUY" if conf_yes > 0.5 or  conf_no > 0.5 else "NO_TRADE"
+
+    if action == "NO_TRADE":
+        direction = None
+        confidence = acc
+    else:
+        direction = "YES" if prob_yes > 0.5 else "NO" if prob_yes < 0.5 else None
+        confidence = conf_yes if direction == "YES" else conf_no
+
     return {
         "agent": "HistoricalAgent",
-        "action": "BUY" if prob_yes > 0.1 else "NO_TRADE",
-        "direction": "YES" if prob_yes > 0.5 else "NO" if prob_yes > 0.1 else None,
-        "score": prob_yes,
+        "action": action,
+        "direction": direction,
+        "score": f"{confidence:.2f}",
         "reason": f"Model trained on {train_count} samples from {sim_count} similar markets. Tested on {test_count} samples. Accuracy: {acc:.2f}, Brier Score: {brier:.2f}",
         "signals": {
             "current_price": target["yes_ask"],
@@ -440,6 +483,15 @@ def run_historical_agent(ctx: dict) -> Dict[str, Any]:
             "similar_markets_evaluated": sim_count,
             "training_samples": train_count,
             "prefix_match": meta.get("event_prefix"),
+        },
+        "raw": {
+            # "similar_markets": [m.__dict__ for m in cohort],
+            "model_details": {
+                "accuracy": acc,
+                "brier_score": brier,
+                "training_samples": train_count,
+                "test_samples": test_count,
+            },
         },
     }
 
