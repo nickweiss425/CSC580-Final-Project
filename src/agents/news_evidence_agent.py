@@ -1,11 +1,12 @@
 """
-Simple NewsEvidenceAgent (Directional) — from scratch
+NewsEvidenceAgent (Directional) — from scratch
 
 Workflow:
-1) Use LLM to create a NewsAPI query from ctx (title + rules).
-2) Fetch recent articles with NewsAPI.
-3) Use LLM to estimate P(YES) from those articles.
-4) Map P(YES) to BUY YES/NO or abstain.
+1) Use LLM to create a NewsAPI query from ctx (title + rules + close_time).
+2) Sanitize the query to remove special characters that break NewsAPI.
+3) Fetch recent articles with NewsAPI (dynamic lookback based on market timing).
+4) Use LLM to filter irrelevant articles, then estimate P(YES).
+5) Map P(YES) to BUY YES/NO or abstain.
 
 Standardized AgentOutput:
 {
@@ -65,6 +66,17 @@ def _safe_json_loads(text: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
+# Sanitize NewsAPI query to remove special characters that break NewsAPI
+def _sanitize_query(query: str) -> str:
+    # Remove special characters
+    cleaned = re.sub(r'[^\w\s"()+\-]', ' ', query)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+
+    # Truncate to NewsAPI's 500-char limit
+    if len(cleaned) > 500:
+        cleaned = cleaned[:500].rsplit(' ', 1)[0]
+
+    return cleaned
 
 def _decision_from_p_yes(p_yes: float) -> Tuple[Optional[str], Optional[str]]:
     if p_yes >= 0.55:
@@ -99,21 +111,47 @@ _query_builder = AssistantAgent(
     name="NewsQueryBuilder",
     model_client=_model_client,
     system_message=(
-        "You generate a NewsAPI query string for the `q` parameter (NewsAPI /v2/everything).\n"
-        "Goal: retrieve SOME relevant articles even if exact wording varies.\n\n"
-        "Input: market title + rules. Output: STRICT JSON only:\n"
-        "{ \"query\": string }\n\n"
-        "Guidelines (follow all):\n"
-        "- Be BROAD enough to return results. Avoid stacking many long quoted phrases.\n"
-        "- Use at most ONE quoted phrase total.\n"
-        "- Prefer this pattern: <main_entity> AND (<syn1> OR <syn2> OR <syn3>)\n"
-        "- Include 2–5 short keywords total (not sentences). Prefer OR groups for synonyms.\n"
-        "- Avoid generic filler words (e.g., 'will', 'strictly', 'greater', 'not', dates unless critical).\n"
-        "- If the market is about sports championships, include synonyms like: NCAA OR \"March Madness\" OR \"national title\".\n"
-        "- If about weather totals, include: snow OR snowfall OR storm OR forecast OR inches.\n"
-        "- If about a person saying a word/phrase, include the person + (speech OR transcript OR remarks) + the target word(s).\n"
-        "- Keep query under 120 characters if possible.\n"
-        "- Return STRICT JSON only. No extra keys.\n"
+        "You generate a NewsAPI query string for the `q` parameter of the /v2/everything endpoint.\n"
+        "Goal: build a SHORT, BROAD query that will retrieve relevant English-language news articles.\n\n"
+
+        "=== NEWSAPI QUERY SYNTAX (follow exactly) ===\n"
+        "Allowed operators: AND, OR, NOT, double-quotes for exact phrases, + (must appear), - (must not appear), parentheses for grouping.\n"
+        "FORBIDDEN characters (will break the API): #, $, %, @, &, *, {, }, [, ], |, \\, ;, <, >, /, !, ^, ~, `, :, comma.\n"
+        "Do NOT include any URLs, dates, or timestamps in the query string.\n"
+        "Max length: 500 characters. Aim for under 120.\n\n"
+
+        "=== QUERY CONSTRUCTION GUIDELINES ===\n"
+        "1. Extract the CORE SUBJECT from the market title (person, team, event, or topic).\n"
+        "2. Use this pattern: <core_subject> AND (<keyword1> OR <keyword2> OR <keyword3>)\n"
+        "3. Use 2-5 short, concrete keywords. Prefer common nouns and verbs journalists would use.\n"
+        "4. Use at most ONE quoted phrase (for a proper name or specific term). Keep it short (2-3 words max).\n"
+        "5. Do NOT use full sentences, questions, or generic filler words like 'will', 'could', 'should', 'market', 'prediction'.\n"
+        "6. Do NOT stack multiple quoted phrases — this is the #1 cause of zero results.\n"
+        "7. For sports: include the sport name + league + team/player. E.g.: basketball AND NBA AND Lakers\n"
+        "8. For weather/climate: include location + weather terms. E.g.: Chicago AND (snow OR snowfall OR storm)\n"
+        "9. For politics/policy: include the person or body + topic. E.g.: \"Federal Reserve\" AND (rate OR interest OR hike)\n"
+        "10. For elections/polls: include candidate or race + election terms. E.g.: Trump AND (poll OR election OR vote)\n\n"
+
+        "=== LOOKBACK DAYS ===\n"
+        "You will be given `time_to_close_h` (hours until the market closes). Use it to choose how far back to search:\n"
+        "- If time_to_close_h <= 48:   lookback_days = 3  (focus on very recent news)\n"
+        "- If time_to_close_h <= 168:  lookback_days = 7\n"
+        "- If time_to_close_h <= 720:  lookback_days = 14\n"
+        "- Otherwise:                  lookback_days = 14\n"
+        "If time_to_close_h is null or missing, default to 7.\n\n"
+
+        "=== OUTPUT FORMAT ===\n"
+        "Return STRICT JSON only. No markdown, no explanation.\n"
+        "{\n"
+        "  \"query\": string,\n"
+        "  \"lookback_days\": int\n"
+        "}\n\n"
+
+        "=== EXAMPLES ===\n"
+        "GOOD: {\"query\": \"\\\"Elon Musk\\\" AND (Tesla OR SpaceX OR CEO)\", \"lookback_days\": 7}\n"
+        "GOOD: {\"query\": \"NCAA AND basketball AND (championship OR tournament OR \\\"March Madness\\\")\", \"lookback_days\": 14}\n"
+        "BAD:  {\"query\": \"Will Elon Musk say 'Mars' in his next speech??\", \"lookback_days\": 7}  ← sentence, special chars\n"
+        "BAD:  {\"query\": \"\\\"exact phrase one\\\" AND \\\"exact phrase two\\\" AND \\\"exact phrase three\\\"\", \"lookback_days\": 7}  ← too many quoted phrases\n"
     ),
 )
 
@@ -121,20 +159,42 @@ _evidence_model = AssistantAgent(
     name="NewsEvidenceModel",
     model_client=_model_client,
     system_message=(
-        "You are an evidence-based analyst for binary markets.\n"
-        "You will be given market title + rules and a list of news articles.\n"
-        "Estimate the probability the market resolves YES based ONLY on the provided articles.\n\n"
-        "Return STRICT JSON only:\n"
+        "You are an evidence-based analyst for binary prediction markets.\n"
+        "You receive a market title, resolution rules, and a list of news articles.\n\n"
+
+        "=== YOUR TASK (two steps) ===\n\n"
+
+        "STEP 1 — RELEVANCE FILTER:\n"
+        "For each article, determine if it is DIRECTLY relevant to the market's resolution criteria.\n"
+        "An article is relevant if it discusses the specific subject, event, or metric that the market resolves on.\n"
+        "Discard articles that are:\n"
+        "  - About a different subject/entity even if superficially similar\n"
+        "  - General background or opinion pieces with no factual bearing on the outcome\n"
+        "  - Paywalled stubs, error pages, or articles with no meaningful content\n"
+        "  - Duplicates of another article already counted\n"
+        "Count how many articles you keep as relevant vs. the total provided.\n\n"
+
+        "STEP 2 — PROBABILITY ESTIMATION:\n"
+        "Using ONLY the relevant articles from Step 1, estimate P(YES) — the probability the market resolves YES.\n\n"
+
+        "=== CALIBRATION RULES ===\n"
+        "- If zero articles are relevant → p_yes = 0.50, confidence = 0.0\n"
+        "- If only 1-2 articles are relevant with indirect evidence → keep p_yes within 0.40–0.60, confidence low (0.1–0.3)\n"
+        "- Use p_yes > 0.65 or < 0.35 ONLY when multiple relevant articles provide strong, direct, factual evidence\n"
+        "- For long-horizon outcomes (season champions, annual records), be conservative — even strong favorites rarely warrant p_yes > 0.75\n"
+        "- For short-horizon outcomes (next 24–48h), direct evidence can push p_yes further from 0.50\n"
+        "- Confidence reflects how much you trust your estimate: 0.0 = pure guess, 1.0 = outcome is essentially confirmed by articles\n"
+        "- Rankings, odds, and punditry are WEAK evidence — they should move p_yes only slightly from 0.50\n\n"
+
+        "=== OUTPUT FORMAT ===\n"
+        "Return STRICT JSON only. No markdown, no explanation.\n"
         "{\n"
+        "  \"relevant_count\": int,\n"
+        "  \"total_count\": int,\n"
         "  \"p_yes\": number (0..1),\n"
         "  \"confidence\": number (0..1),\n"
-        "  \"summary\": string\n"
-        "}\n\n"
-        "Calibration rules:\n"
-        "- If articles are mostly indirect (rankings, odds, punditry, general discussion), keep p_yes near 0.50 and confidence low.\n"
-        "- Use high p_yes (>0.65) ONLY when articles contain strong, direct evidence tied to the resolution criteria.\n"
-        "- For long-horizon outcomes (e.g., season champion), even the favorite is usually not \"very likely\"; avoid extreme probabilities.\n"
-        "- If evidence is weak/unrelated, set p_yes≈0.50 and confidence low.\n"
+        "  \"summary\": string (1-2 sentences explaining your reasoning)\n"
+        "}\n"
     ),
 )
 
@@ -179,6 +239,8 @@ async def run_news_evidence_agent(ctx: Dict[str, Any]) -> Dict[str, Any]:
     rules_primary = _get_str(ctx, "rules_primary")
     rules_secondary = _get_str(ctx, "rules_secondary")
     event_ticker = _get_str(ctx, "event_ticker")
+    close_time = _get_str(ctx, "close_time")
+    time_to_close_h = ctx.get("time_to_close_h")
 
     if not title:
         return {
@@ -197,6 +259,8 @@ async def run_news_evidence_agent(ctx: Dict[str, Any]) -> Dict[str, Any]:
         "event_ticker": event_ticker,
         "rules_primary": rules_primary,
         "rules_secondary": rules_secondary,
+        "close_time": close_time,
+        "time_to_close_h": round(time_to_close_h, 1) if time_to_close_h is not None else None,
     }
     qb_prompt = (
         "Create a NewsAPI query for this market.\n"
@@ -205,6 +269,7 @@ async def run_news_evidence_agent(ctx: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     query = title  # fallback
+    lookback_days = 7  # default
     qb_raw: Dict[str, Any] = {}
     try:
         qb_result = await _query_builder.run(task=[TextMessage(content=qb_prompt, source='user')])
@@ -213,11 +278,16 @@ async def run_news_evidence_agent(ctx: Dict[str, Any]) -> Dict[str, Any]:
         qb_raw = qb_data if isinstance(qb_data, dict) else {}
         if isinstance(qb_raw.get("query", None), str) and qb_raw["query"].strip():
             query = qb_raw["query"].strip()
+        if isinstance(qb_raw.get("lookback_days", None), (int, float)):
+            lookback_days = max(1, min(14, int(qb_raw["lookback_days"])))
     except Exception as e:
         qb_raw = {"error": str(e)}
 
-    # 2) Fetch articles
-    articles = await _fetch_news_articles(query, max_articles=10, lookback_days=7)
+    # 2) Sanitize query to remove special characters that break NewsAPI
+    query = _sanitize_query(query)
+
+    # 3) Fetch articles using dynamic lookback
+    articles = await _fetch_news_articles(query, max_articles=10, lookback_days=lookback_days)
 
     if not articles:
         return {
@@ -229,8 +299,8 @@ async def run_news_evidence_agent(ctx: Dict[str, Any]) -> Dict[str, Any]:
             "signals": {"query": query, "articles_found": 0},
             "raw": {"query_builder": qb_raw, "articles": []},
         }
-
-    # 3) Ask LLM to estimate P(YES)
+    
+    # 4) Ask LLM to filter for relevance, then estimate P(YES)
     ev_payload = {
         "title": title,
         "rules_primary": rules_primary,
@@ -238,7 +308,7 @@ async def run_news_evidence_agent(ctx: Dict[str, Any]) -> Dict[str, Any]:
         "articles": articles,
     }
     ev_prompt = (
-        "Estimate P(YES) for this market using only the provided articles.\n"
+        "First filter the articles for relevance to the market, then estimate P(YES).\n"
         "Return STRICT JSON only.\n\n"
         f"{json.dumps(ev_payload, ensure_ascii=False)}"
     )
@@ -246,6 +316,8 @@ async def run_news_evidence_agent(ctx: Dict[str, Any]) -> Dict[str, Any]:
     p_yes = 0.5
     conf = 0.0
     summary = ""
+    relevant_count = 0
+    total_count = len(articles)
     ev_raw: Dict[str, Any] = {}
 
     try:
@@ -257,6 +329,8 @@ async def run_news_evidence_agent(ctx: Dict[str, Any]) -> Dict[str, Any]:
         p_yes = _clamp(float(ev_raw.get("p_yes", 0.5)))
         conf = _clamp(float(ev_raw.get("confidence", 0.0)))
         summary = str(ev_raw.get("summary", "") or "")
+        relevant_count = int(ev_raw.get("relevant_count", 0) or 0)
+        total_count = int(ev_raw.get("total_count", total_count) or total_count)
     except Exception as e:
         ev_raw = {"error": str(e)}
         summary = "Evidence analysis failed."
@@ -280,12 +354,14 @@ async def run_news_evidence_agent(ctx: Dict[str, Any]) -> Dict[str, Any]:
             "p_yes": float(p_yes),
             "confidence": float(conf),
             "articles_found": len(articles),
+            "relevant_count": relevant_count,
+            "total_count": total_count,
         },
         "raw": {
             "query_builder": qb_raw,
             "articles": articles,
             "evidence": ev_raw,
-            "rule": "LLM builds query; LLM estimates P(YES) from fetched articles; threshold to BUY/abstain.",
+            "rule": "LLM builds query; LLM filters for relevance then estimates P(YES) from articles; threshold to BUY/abstain.",
         },
     }
 

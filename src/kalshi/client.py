@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypedDict
 import requests
 import json
 
@@ -188,4 +188,62 @@ def build_list_title(m: dict) -> str:
         return f"{base}    {yes_label}"
 
     return base
+
+
+def fetch_candlesticks(
+    market_ticker: str,
+    start_ts: int,
+    end_ts: int,
+    period_interval: int = 60,  # 1, 60, or 1440
+) -> List[Dict[str, Any]]:
+    """
+    Fetch candlestick data for a market between start_ts and end_ts.
+
+    Returns a list of dicts like:
+    {
+        "end_ts": int,
+        "open": float,
+        "high": float,
+        "low": float,
+        "close": float,
+        "volume": int,
+        "open_interest": int,
+    }
+    """
+
+    # derive series ticker from market ticker
+    series_ticker = market_ticker.split("-")[0]
+
+    url = f"{BASE_URL}/series/{series_ticker}/markets/{market_ticker}/candlesticks"
+
+    params = {
+        "start_ts": int(start_ts),
+        "end_ts": int(end_ts),
+        "period_interval": int(period_interval),
+    }
+
+    resp = requests.get(url, params=params, timeout=10)
+    resp.raise_for_status()
+
+    raw = resp.json().get("candlesticks", [])
+
+    candles = []
+    for c in raw:
+        price = c.get("price", {})
+
+        candles.append({
+            "end_ts": int(c["end_period_ts"]),
+            "open": float(price.get("open")) / 100.0 if price.get("open") is not None else None,
+            "high": float(price.get("high")) / 100.0 if price.get("high") is not None else None,
+            "low": float(price.get("low")) / 100.0 if price.get("low") is not None else None,
+            "close": float(price.get("close")) / 100.0 if price.get("close") is not None else None,
+            "volume": int(c.get("volume", 0)),
+            "open_interest": int(c.get("open_interest", 0)),
+        })
+
+    candles.sort(key=lambda x: x["end_ts"])
+    return candles
+
+
+
 
